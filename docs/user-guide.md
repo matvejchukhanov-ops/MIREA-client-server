@@ -47,9 +47,9 @@ python --version
 
 | Оболочка | Приглашение | Команда запуска |
 |---|---|---|
-| cmd.exe | `C:\путь>` | `cd /d "C:\Claude pr\client-server" && python -m server.main` |
-| PowerShell | `PS C:\путь>` | `cd "C:\Claude pr\client-server"; python -m server.main` |
-| Git Bash, Linux, macOS | `пользователь@машина$` | `cd "C:/Claude pr/client-server" && python -m server.main` |
+| cmd.exe | `C:\путь>` | `cd /d "C:\MIREA\client-server" && python -m server.main` |
+| PowerShell | `PS C:\путь>` | `cd "C:\MIREA\client-server"; python -m server.main` |
+| Git Bash, Linux, macOS | `пользователь@машина$` | `cd "C:/MIREA/client-server" && python -m server.main` |
 
 Различия существенны:
 
@@ -57,7 +57,8 @@ python --version
   и попадёт в аргумент предыдущей команды;
 - в **bash** разделителем пути служит только прямой слэш, обратный является
   экранирующим символом;
-- **кавычки обязательны** во всех оболочках, поскольку в пути есть пробел.
+- **кавычки обязательны**, если в пути к проекту есть пробелы; для пути
+  без пробелов они не мешают.
 
 При успешном запуске выводится:
 
