@@ -38,6 +38,7 @@ class CommandSpec:
 
 COMMANDS: dict[str, CommandSpec] = {
     "help": CommandSpec("help", "список команд"),
+    "cls": CommandSpec("cls (clear)", "очистить экран"),
     "register": CommandSpec("register <логин>", "регистрация (пароль спрашивается отдельно)"),
     "login": CommandSpec("login <логин>", "вход"),
     "logout": CommandSpec("logout", "выход из учётной записи"),
@@ -65,6 +66,14 @@ COMMANDS: dict[str, CommandSpec] = {
 
 EXIT_WORDS = {"quit", "exit", "выход"}
 
+# Команды, которые выполняет сам клиент, не обращаясь к серверу.
+LOCAL_COMMANDS = {"help": "help", "cls": "cls", "clear": "cls"}
+
+
+def local_action(line: str) -> str | None:
+    """Имя локального действия ("help", "cls") или None, если команда для сервера."""
+    return LOCAL_COMMANDS.get(line.strip().lower())
+
 
 def help_text() -> str:
     width = max(len(spec.usage) for spec in COMMANDS.values())
@@ -77,7 +86,7 @@ def help_text() -> str:
 
 
 def build_request(line: str, source: Input) -> dict[str, Any] | None:
-    """Строка пользователя -> запрос. None — команда выполнена локально (help)."""
+    """Строка пользователя -> запрос. None — команда локальная (help, cls)."""
     text = line.strip()
 
     # Сырой JSON пропускаем как есть: так можно вручную проверить, как сервер
@@ -104,7 +113,8 @@ def build_request(line: str, source: Input) -> dict[str, Any] | None:
 
     if name in EXIT_WORDS:
         return {"cmd": "quit"}
-    if name == "help":
+    if name in LOCAL_COMMANDS:
+        _expect_local(name, args)
         return None
     if name in {"ping", "logout", "whoami", "drives"}:
         _expect(name, args, 0, 0)
@@ -192,6 +202,12 @@ def build_request(line: str, source: Input) -> dict[str, Any] | None:
 def _expect(name: str, args: list[str], minimum: int, maximum: int) -> None:
     if not minimum <= len(args) <= maximum:
         raise UsageError(f"Использование: {COMMANDS[name].usage}")
+
+
+def _expect_local(name: str, args: list[str]) -> None:
+    if args:
+        usage = COMMANDS[LOCAL_COMMANDS[name]].usage
+        raise UsageError(f"Использование: {usage}")
 
 
 def _number(raw: str) -> int:

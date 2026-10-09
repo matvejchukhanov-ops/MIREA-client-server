@@ -11,12 +11,14 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
+import subprocess
 import sys
 from typing import Any
 
 from common.framing import FrameTooLongError
 
-from .commands import END_OF_TEXT, Input, UsageError, build_request, help_text
+from .commands import END_OF_TEXT, Input, UsageError, build_request, help_text, local_action
 from .connection import ServerClosedConnection, ServerConnection
 from .render import render
 
@@ -108,6 +110,14 @@ def run_session(connection: ServerConnection, source: Input) -> None:
         if not line.strip():
             continue
 
+        action = local_action(line)
+        if action == "cls":
+            clear_screen()
+            continue
+        if action == "help":
+            print(help_text())
+            continue
+
         try:
             request = build_request(line, source)
         except UsageError as exc:
@@ -139,6 +149,23 @@ def run_session(connection: ServerConnection, source: Input) -> None:
 
         if request.get("cmd") == "quit":
             return
+
+
+def clear_screen() -> None:
+    """Очистить окно терминала."""
+    if not sys.stdout.isatty():
+        # Вывод перенаправлен в файл — там очищать нечего.
+        return
+    if os.name == "nt":
+        # Консоль Windows не всегда понимает управляющие последовательности
+        # ANSI, а встроенная команда cls работает везде. Список аргументов,
+        # а не строка для оболочки: os.system("...") — классическое место
+        # для внедрения команд, даже если сегодня строка постоянная.
+        subprocess.run(["cmd", "/c", "cls"], check=False)
+    else:
+        # Перевести курсор в начало и стереть экран.
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
 
 
 def _offers_overwrite(request: dict[str, Any], data: Any) -> bool:

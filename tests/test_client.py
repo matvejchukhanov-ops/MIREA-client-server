@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from client.commands import COMMANDS, Input, UsageError, build_request, help_text
+from client.commands import COMMANDS, Input, UsageError, build_request, help_text, local_action
 from client.render import human_size, render
 
 
@@ -78,6 +78,17 @@ class BuildRequestTests(unittest.TestCase):
         self.assertIsNone(build_request("help", scripted()))
         for spec in COMMANDS.values():
             self.assertIn(spec.usage, help_text())
+
+    def test_очистка_экрана_локально(self) -> None:
+        # cls не уходит на сервер: это действие самого клиента.
+        for line in ("cls", "CLEAR", "  clear  "):
+            with self.subTest(line=line):
+                self.assertEqual(local_action(line), "cls")
+                self.assertIsNone(build_request(line, scripted()))
+        self.assertEqual(local_action("help"), "help")
+        self.assertIsNone(local_action("ls"))
+        with self.assertRaises(UsageError):
+            build_request("cls лишнее", scripted())
 
     def test_сырой_json(self) -> None:
         self.assertEqual(build_request('{"cmd":"ping","id":1}', scripted()), {"cmd": "ping", "id": 1})
