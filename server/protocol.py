@@ -23,18 +23,38 @@ class ErrorCode(StrEnum):
     текст сообщения в клиенте нельзя: формулировки меняются, коды — нет.
     """
 
+    # Протокол и транспорт
     BAD_JSON = "BAD_JSON"
     BAD_REQUEST = "BAD_REQUEST"
     UNKNOWN_COMMAND = "UNKNOWN_COMMAND"
-    EXPR_TOO_LONG = "EXPR_TOO_LONG"
-    UNKNOWN_CHAR = "UNKNOWN_CHAR"
-    SYNTAX_ERROR = "SYNTAX_ERROR"
-    DEPTH_EXCEEDED = "DEPTH_EXCEEDED"
-    DIV_BY_ZERO = "DIV_BY_ZERO"
-    NUMBER_TOO_LARGE = "NUMBER_TOO_LARGE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     FRAME_TOO_LONG = "FRAME_TOO_LONG"
     SERVER_BUSY = "SERVER_BUSY"
+
+    # Аутентификация
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    AUTH_FAILED = "AUTH_FAILED"
+    ACCOUNT_LOCKED = "ACCOUNT_LOCKED"
+    ALREADY_LOGGED_IN = "ALREADY_LOGGED_IN"
+    REGISTRATION_CLOSED = "REGISTRATION_CLOSED"
+    BAD_USERNAME = "BAD_USERNAME"
+    WEAK_PASSWORD = "WEAK_PASSWORD"
+    USER_EXISTS = "USER_EXISTS"
+
+    # Файлы
+    BAD_PATH = "BAD_PATH"
+    NOT_FOUND = "NOT_FOUND"
+    ALREADY_EXISTS = "ALREADY_EXISTS"
+    NOT_A_FILE = "NOT_A_FILE"
+    NOT_A_DIRECTORY = "NOT_A_DIRECTORY"
+    DIR_NOT_EMPTY = "DIR_NOT_EMPTY"
+    FILE_TOO_LARGE = "FILE_TOO_LARGE"
+    NOT_TEXT = "NOT_TEXT"
+    ACCESS_DENIED = "ACCESS_DENIED"
+    BAD_FORMAT = "BAD_FORMAT"
+    BAD_ARCHIVE = "BAD_ARCHIVE"
+    UNSAFE_ARCHIVE = "UNSAFE_ARCHIVE"
+    LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
 
 
 class ProtocolError(Exception):
@@ -47,6 +67,12 @@ class ProtocolError(Exception):
         self.position = position
 
 
+# Предел длины строковых аргументов, кроме содержимого файла. Имя пользователя,
+# путь или пароль длиной в мегабайт — не ошибка пользователя, а попытка
+# заставить сервер тратить время на хеширование и разбор.
+MAX_ARGUMENT_LENGTH = 4096
+
+
 @dataclass(frozen=True, slots=True)
 class Request:
     """Разобранный запрос клиента."""
@@ -55,7 +81,9 @@ class Request:
     id: str | int | None
     payload: dict[str, Any]
 
-    def require_str(self, name: str) -> str:
+    def require_str(
+        self, name: str, *, max_length: int = MAX_ARGUMENT_LENGTH, allow_empty: bool = False
+    ) -> str:
         """Достать обязательный строковый аргумент."""
         value = self.payload.get(name)
         if value is None:
@@ -64,7 +92,19 @@ class Request:
             )
         if not isinstance(value, str):
             raise ProtocolError(ErrorCode.BAD_REQUEST, f"Поле {name!r} должно быть строкой")
+        if not value and not allow_empty:
+            raise ProtocolError(ErrorCode.BAD_REQUEST, f"Поле {name!r} не может быть пустым")
+        if len(value) > max_length:
+            raise ProtocolError(
+                ErrorCode.BAD_REQUEST, f"Поле {name!r} длиннее {max_length} символов"
+            )
         return value
+
+    def optional_str(self, name: str, default: str) -> str:
+        """Необязательный строковый аргумент."""
+        if self.payload.get(name) is None:
+            return default
+        return self.require_str(name, allow_empty=True)
 
     def optional_int(self, name: str, default: int, *, minimum: int, maximum: int) -> int:
         """Достать необязательный целочисленный аргумент с проверкой границ."""
@@ -80,6 +120,42 @@ class Request:
                 f"Поле {name!r} должно быть в диапазоне {minimum}-{maximum}, получено {value}",
             )
         return value
+
+    def optional_bool(self, name: str, default: bool) -> bool:
+        """Необязательный логический аргумент. Строка "true" не считается."""
+        value = self.payload.get(name)
+        if value is None:
+            return default
+        if not isinstance(value, bool):
+            raise ProtocolError(ErrorCode.BAD_REQUEST, f"Поле {name!r} должно быть true или false")
+        return value
+
+    def require_str_list(self, name: str, *, max_items: int) -> list[str]:
+        """Обязательный непустой список строк."""
+        value = self.payload.get(name)
+        if not isinstance(value, list) or not value:
+            raise ProtocolError(
+                ErrorCode.BAD_REQUEST, f"Поле {name!r} должно быть непустым списком строк"
+            )
+        if len(value) > max_items:
+            raise ProtocolError(
+                ErrorCode.BAD_REQUEST, f"В поле {name!r} больше {max_items} элементов"
+            )
+        if not all(isinstance(item, str) and item for item in value):
+            raise ProtocolError(
+                ErrorCode.BAD_REQUEST, f"Элементы поля {name!r} должны быть непустыми строками"
+            )
+        if any(len(item) > MAX_ARGUMENT_LENGTH for item in value):
+            raise ProtocolError(ErrorCode.BAD_REQUEST, f"Слишком длинный элемент в поле {name!r}")
+        return value
+
+    def require_present(self, name: str) -> Any:
+        """Обязательное поле произвольного JSON-типа."""
+        if name not in self.payload:
+            raise ProtocolError(
+                ErrorCode.BAD_REQUEST, f"Команда {self.cmd!r} требует поля {name!r}"
+            )
+        return self.payload[name]
 
 
 def parse_request(frame: bytes) -> Request:
@@ -99,6 +175,11 @@ def parse_request(frame: bytes) -> Request:
         raise ProtocolError(
             ErrorCode.BAD_JSON, f"Не удалось разобрать JSON: {exc.msg}", position=exc.pos
         ) from exc
+    except RecursionError as exc:
+        # Строка из тысяч открывающих скобок исчерпывает стек разборщика.
+        # Без перехвата исключение вылетело бы мимо обработки ошибок и
+        # оборвало соединение вместо внятного ответа.
+        raise ProtocolError(ErrorCode.BAD_JSON, "Слишком глубокая вложенность JSON") from exc
 
     if not isinstance(data, dict):
         raise ProtocolError(ErrorCode.BAD_JSON, "Ожидался объект JSON")
@@ -108,12 +189,16 @@ def parse_request(frame: bytes) -> Request:
         raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'cmd' обязательно")
     if not isinstance(cmd, str) or not cmd:
         raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'cmd' должно быть непустой строкой")
+    if len(cmd) > 64:
+        raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'cmd' слишком длинное")
 
     request_id = data.get("id")
     if request_id is not None and not isinstance(request_id, (str, int)):
         raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'id' должно быть строкой или числом")
     if isinstance(request_id, bool):
         raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'id' должно быть строкой или числом")
+    if isinstance(request_id, str) and len(request_id) > 128:
+        raise ProtocolError(ErrorCode.BAD_REQUEST, "Поле 'id' слишком длинное")
 
     return Request(cmd=cmd, id=request_id, payload=data)
 

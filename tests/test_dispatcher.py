@@ -1,4 +1,4 @@
-"""Тесты диспетчера и обработчиков команд.
+"""Тесты диспетчера: поиск команды, контроль доступа, журнал аудита.
 
 Запуск:
     python -m unittest discover
@@ -6,15 +6,25 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from server.dispatcher import Dispatcher
-from server.handlers import build_dispatcher
 from server.protocol import ErrorCode, ProtocolError, Request
-from server.session import Session
+from server.session import AuthenticatedUser, Session
 
 
 def make_request(cmd: str, **payload: object) -> Request:
     return Request(cmd=cmd, id=None, payload={"cmd": cmd, **payload})
+
+
+class MemoryAudit:
+    """Журнал в памяти — чтобы видеть, что диспетчер в него пишет."""
+
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def record(self, **fields: Any) -> None:
+        self.records.append(fields)
 
 
 class DispatcherTests(unittest.TestCase):
@@ -23,30 +33,26 @@ class DispatcherTests(unittest.TestCase):
 
     def test_вызывает_зарегистрированный_обработчик(self) -> None:
         dispatcher = Dispatcher()
-        dispatcher.register("double", lambda request, session: 42)
+        dispatcher.register("double", lambda request, session: 42, public=True)
         self.assertEqual(dispatcher.dispatch(make_request("double"), self.session), 42)
 
     def test_обработчик_получает_запрос_и_сессию(self) -> None:
         seen: list[object] = []
         dispatcher = Dispatcher()
-        dispatcher.register("spy", lambda request, session: seen.append((request, session)))
+        dispatcher.register(
+            "spy", lambda request, session: seen.append((request, session)), public=True
+        )
         dispatcher.dispatch(make_request("spy"), self.session)
         self.assertEqual(len(seen), 1)
         self.assertIs(seen[0][1], self.session)
 
     def test_неизвестная_команда(self) -> None:
         dispatcher = Dispatcher()
-        dispatcher.register("ping", lambda request, session: "pong")
+        dispatcher.register("ping", lambda request, session: "pong", public=True)
         with self.assertRaises(ProtocolError) as ctx:
             dispatcher.dispatch(make_request("нет такой"), self.session)
         self.assertEqual(ctx.exception.code, ErrorCode.UNKNOWN_COMMAND)
-
-    def test_сообщение_перечисляет_доступные_команды(self) -> None:
         # Иначе клиенту негде узнать, что вообще поддерживается.
-        dispatcher = Dispatcher()
-        dispatcher.register("ping", lambda request, session: "pong")
-        with self.assertRaises(ProtocolError) as ctx:
-            dispatcher.dispatch(make_request("wat"), self.session)
         self.assertIn("ping", ctx.exception.message)
 
     def test_повторная_регистрация_запрещена(self) -> None:
@@ -58,72 +64,98 @@ class DispatcherTests(unittest.TestCase):
             dispatcher.register("ping", lambda request, session: "другое")
 
 
-class HandlerTests(unittest.TestCase):
+class AccessControlTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.dispatcher = build_dispatcher()
-        self.session = Session(peer="127.0.0.1:1234")
-
-    def test_ping_отвечает_pong(self) -> None:
-        self.assertEqual(self.dispatcher.dispatch(make_request("ping"), self.session), "pong")
-
-    def test_ping_не_закрывает_соединение(self) -> None:
-        self.dispatcher.dispatch(make_request("ping"), self.session)
-        self.assertFalse(self.session.should_close)
-
-    def test_quit_прощается_и_помечает_сессию(self) -> None:
-        result = self.dispatcher.dispatch(make_request("quit"), self.session)
-        self.assertEqual(result, "bye")
-        # Соединение закрывает цикл обмена — после того, как ответ отправлен.
-        self.assertTrue(self.session.should_close)
-
-    def test_зарегистрированы_все_команды_протокола(self) -> None:
-        self.assertEqual(self.dispatcher.commands, ["calc", "history", "ping", "quit"])
-
-    def test_calc_считает(self) -> None:
-        self.assertEqual(
-            self.dispatcher.dispatch(make_request("calc", expr="2+3*4"), self.session), 14
+        self.calls: list[str] = []
+        self.dispatcher = Dispatcher()
+        self.dispatcher.register("secret", lambda request, session: self.calls.append("secret"))
+        self.dispatcher.register(
+            "open", lambda request, session: self.calls.append("open"), public=True
         )
 
-    def test_calc_без_выражения(self) -> None:
+    def test_по_умолчанию_нужен_вход(self) -> None:
+        # Команда, при регистрации которой забыли про доступ, закрыта, а не открыта.
         with self.assertRaises(ProtocolError) as ctx:
-            self.dispatcher.dispatch(make_request("calc"), self.session)
-        self.assertEqual(ctx.exception.code, ErrorCode.BAD_REQUEST)
+            self.dispatcher.dispatch(make_request("secret"), Session(peer="p"))
+        self.assertEqual(ctx.exception.code, ErrorCode.AUTH_REQUIRED)
+        self.assertEqual(self.calls, [])
 
-    def test_ошибка_вычисления_превращается_в_код_протокола(self) -> None:
-        with self.assertRaises(ProtocolError) as ctx:
-            self.dispatcher.dispatch(make_request("calc", expr="1/0"), self.session)
-        self.assertEqual(ctx.exception.code, ErrorCode.DIV_BY_ZERO)
+    def test_после_входа_доступно(self) -> None:
+        session = Session(peer="p", user=AuthenticatedUser(1, "ivan"))
+        self.dispatcher.dispatch(make_request("secret"), session)
+        self.assertEqual(self.calls, ["secret"])
 
-    def test_позиция_ошибки_доходит_до_протокола(self) -> None:
-        with self.assertRaises(ProtocolError) as ctx:
-            self.dispatcher.dispatch(make_request("calc", expr="2 + $"), self.session)
-        self.assertEqual(ctx.exception.code, ErrorCode.UNKNOWN_CHAR)
-        self.assertEqual(ctx.exception.position, 4)
+    def test_открытая_команда_доступна_без_входа(self) -> None:
+        self.dispatcher.dispatch(make_request("open"), Session(peer="p"))
+        self.assertEqual(self.calls, ["open"])
 
-    def test_история_накапливается(self) -> None:
-        self.dispatcher.dispatch(make_request("calc", expr="2+2"), self.session)
-        self.dispatcher.dispatch(make_request("calc", expr="10/4"), self.session)
-        history = self.dispatcher.dispatch(make_request("history"), self.session)
+
+class AuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.audit = MemoryAudit()
+        self.dispatcher = Dispatcher(audit=self.audit)
+        self.session = Session(peer="10.0.0.1:5000", user=AuthenticatedUser(7, "ivan"))
+
+    def test_успешная_команда_записывается(self) -> None:
+        self.dispatcher.register("read", lambda request, session: "ok")
+        self.dispatcher.dispatch(make_request("read", path="docs/a.txt"), self.session)
         self.assertEqual(
-            history, [{"expr": "2+2", "result": 4}, {"expr": "10/4", "result": 2.5}]
+            self.audit.records,
+            [{
+                "user_id": 7, "username": "ivan", "peer": "10.0.0.1:5000", "action": "read",
+                "target": "docs/a.txt", "success": True, "details": None,
+            }],
         )
 
-    def test_неудачное_вычисление_в_историю_не_попадает(self) -> None:
+    def test_отказ_записывается_с_кодом(self) -> None:
+        def fail(request: Request, session: Session) -> None:
+            raise ProtocolError(ErrorCode.NOT_FOUND, "нет")
+
+        self.dispatcher.register("read", fail)
         with self.assertRaises(ProtocolError):
-            self.dispatcher.dispatch(make_request("calc", expr="1/0"), self.session)
-        self.assertEqual(self.dispatcher.dispatch(make_request("history"), self.session), [])
+            self.dispatcher.dispatch(make_request("read", path="x"), self.session)
+        self.assertEqual(self.audit.records[0]["success"], False)
+        self.assertEqual(self.audit.records[0]["details"], "NOT_FOUND")
 
-    def test_история_ограничена_запрошенным_числом(self) -> None:
-        for number in range(5):
-            self.dispatcher.dispatch(make_request("calc", expr=str(number)), self.session)
-        history = self.dispatcher.dispatch(make_request("history", limit=2), self.session)
-        # Последние по времени, в хронологическом порядке.
-        self.assertEqual([item["expr"] for item in history], ["3", "4"])
+    def test_попытка_без_входа_записывается(self) -> None:
+        self.dispatcher.register("read", lambda request, session: "ok")
+        with self.assertRaises(ProtocolError):
+            self.dispatcher.dispatch(make_request("read", path="x"), Session(peer="p"))
+        self.assertEqual(self.audit.records[0]["details"], "AUTH_REQUIRED")
+        self.assertIsNone(self.audit.records[0]["user_id"])
 
-    def test_история_отдельна_у_каждого_соединения(self) -> None:
-        other = Session(peer="127.0.0.1:9999")
-        self.dispatcher.dispatch(make_request("calc", expr="2+2"), self.session)
-        self.assertEqual(self.dispatcher.dispatch(make_request("history"), other), [])
+    def test_пароль_в_журнал_не_попадает(self) -> None:
+        self.dispatcher.register("login", lambda request, session: "ok", public=True)
+        self.dispatcher.dispatch(
+            make_request("login", username="ivan", password="tops3cret!"), Session(peer="p")
+        )
+        self.assertNotIn("tops3cret!", repr(self.audit.records))
+        self.assertEqual(self.audit.records[0]["username"], "ivan")
+
+    def test_служебная_команда_не_записывается(self) -> None:
+        self.dispatcher.register("ping", lambda request, session: "pong", public=True, audited=False)
+        self.dispatcher.dispatch(make_request("ping"), self.session)
+        self.assertEqual(self.audit.records, [])
+
+    def test_выход_записывается_от_имени_вышедшего(self) -> None:
+        def logout(request: Request, session: Session) -> str:
+            session.user = None
+            return "ok"
+
+        self.dispatcher.register("logout", logout)
+        self.dispatcher.dispatch(make_request("logout"), self.session)
+        self.assertEqual(self.audit.records[0]["user_id"], 7)
+
+    def test_сбой_журнала_не_ломает_команду(self) -> None:
+        class BrokenAudit:
+            def record(self, **fields: Any) -> None:
+                raise RuntimeError("диск заполнен")
+
+        dispatcher = Dispatcher(audit=BrokenAudit())
+        dispatcher.register("read", lambda request, session: "данные")
+        with self.assertLogs("server.dispatcher", level="ERROR"):
+            result = dispatcher.dispatch(make_request("read"), self.session)
+        self.assertEqual(result, "данные")
 
 
 if __name__ == "__main__":

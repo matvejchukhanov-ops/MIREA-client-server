@@ -60,6 +60,7 @@ obj/
 *.sqlite3
 *.db-journal
 data/
+storage/
 dumps/
 
 # --- Логи ---

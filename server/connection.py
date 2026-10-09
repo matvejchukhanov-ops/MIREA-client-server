@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 
 from common.framing import FrameReader, FrameTooLongError
@@ -26,6 +27,15 @@ Address = tuple[str, int]
 # Пределы «вежливого» закрытия после ошибки протокола.
 DRAIN_TIMEOUT = 1.0
 DRAIN_LIMIT = 64 * 1024
+
+# Сколько байт кадра показывать в отладочном логе. Кадр с файлом весит
+# мегабайты, и целиком в логе он только мешает.
+DEBUG_PREVIEW = 300
+
+# Значение поля password в сыром кадре. Отладочный лог пишет кадры как есть,
+# и без маскировки пароль каждого входа оседал бы в файле лога открытым
+# текстом — ровно то, от чего защищает хеширование в базе.
+_PASSWORD_FIELD = re.compile(rb'("password"\s*:\s*)"(?:[^"\\]|\\.)*"')
 
 
 def handle_connection(
@@ -87,9 +97,11 @@ def handle_connection(
             # сторону: кадров может прийти несколько, а может не прийти ни одного.
             for frame in frames:
                 frames_total += 1
-                logger.debug("Запрос от %s: %r", peer, frame)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Запрос от %s: %r", peer, _preview(_redact(frame)))
                 response = _process_frame(frame, session, dispatcher)
-                logger.debug("Ответ для %s: %r", peer, response)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("Ответ для %s: %r", peer, _preview(response))
                 # sendall, а не send: send отправляет столько, сколько получилось,
                 # и остаток пришлось бы досылать вручную.
                 sock.sendall(response)
@@ -156,6 +168,17 @@ def _process_frame(frame: bytes, session: Session, dispatcher: Dispatcher) -> by
         )
 
     return success_frame(result, request_id=request.id)
+
+
+def _redact(frame: bytes) -> bytes:
+    """Заменить значение пароля звёздочками."""
+    return _PASSWORD_FIELD.sub(rb'\1"***"', frame)
+
+
+def _preview(data: bytes) -> bytes:
+    if len(data) <= DEBUG_PREVIEW:
+        return data
+    return data[:DEBUG_PREVIEW] + b"... (%d bytes)" % len(data)
 
 
 def _try_send(sock: socket.socket, data: bytes, peer: str) -> None:

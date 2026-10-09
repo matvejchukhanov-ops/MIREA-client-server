@@ -22,7 +22,11 @@ CARRIAGE_RETURN = b"\r"
 # Предельный размер кадра вместе с завершающим переводом строки.
 # Ограничение обязательно: без него клиент, отправляющий бесконечный поток
 # без разделителей, заполнит память сервера — отказ в обслуживании одной строкой.
-MAX_FRAME_SIZE = 4096
+#
+# Кадр несёт содержимое файла, поэтому он заметно больше текстового размера
+# файла: в JSON управляющие символы экранируются шестью байтами вместо одного.
+# Два мегабайта покрывают худший случай для файла в 256 КиБ с запасом.
+MAX_FRAME_SIZE = 2 * 1024 * 1024
 
 
 class FramingError(Exception):
@@ -60,13 +64,17 @@ class FrameReader:
     вызова.
     """
 
-    __slots__ = ("_buffer", "_max_frame_size")
+    __slots__ = ("_buffer", "_max_frame_size", "_scanned")
 
     def __init__(self, max_frame_size: int = MAX_FRAME_SIZE) -> None:
         if max_frame_size < 2:
             raise ValueError("Размер кадра должен вмещать хотя бы один байт и разделитель")
         self._buffer = bytearray()
         self._max_frame_size = max_frame_size
+        # Сколько байт буфера уже просмотрено и заведомо не содержит
+        # разделителя. Без этого большой кадр, приходящий десятками чтений,
+        # просматривался бы с начала после каждого из них.
+        self._scanned = 0
 
     def feed(self, data: bytes) -> list[bytes]:
         """Добавить прочитанные байты и вернуть все завершённые кадры.
@@ -83,8 +91,9 @@ class FrameReader:
         frames: list[bytes] = []
 
         while True:
-            index = self._buffer.find(DELIMITER)
+            index = self._buffer.find(DELIMITER, self._scanned)
             if index == -1:
+                self._scanned = len(self._buffer)
                 break
 
             frame_size = index + len(DELIMITER)
@@ -93,6 +102,7 @@ class FrameReader:
 
             frame = bytes(self._buffer[:index])
             del self._buffer[:frame_size]
+            self._scanned = 0
             frames.append(_strip_carriage_return(frame))
 
         # Разделителя нет, а места уже не осталось: любой кадр, который здесь
@@ -110,6 +120,7 @@ class FrameReader:
     def reset(self) -> None:
         """Забыть накопленное — например, после ошибки фрейминга."""
         self._buffer.clear()
+        self._scanned = 0
 
 
 def _strip_carriage_return(frame: bytes) -> bytes:

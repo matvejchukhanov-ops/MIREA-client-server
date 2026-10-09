@@ -15,7 +15,7 @@ from types import TracebackType
 
 from common.framing import MAX_FRAME_SIZE, FrameReader, encode_frame
 
-DEFAULT_RECV_SIZE = 4096
+DEFAULT_RECV_SIZE = 64 * 1024
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_REPLY_TIMEOUT = 10.0
 

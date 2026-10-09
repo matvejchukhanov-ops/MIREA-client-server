@@ -3,11 +3,13 @@
 Запуск:
     python -m server.main
     python -m server.main --host 0.0.0.0 --port 9000 --log-level DEBUG
+    python -m server.main --storage ./storage --db ./data/filemanager.db
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import sqlite3
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +24,7 @@ logger = logging.getLogger("server.main")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="server",
-        description="Сервер калькулятора выражений (этап 1: эхо)",
+        description="Сервер файлового менеджера",
     )
     parser.add_argument("--host", help="Адрес для прослушивания")
     parser.add_argument("--port", type=int, help="Порт для прослушивания")
@@ -32,6 +34,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Уровень подробности логов",
     )
     parser.add_argument("--log-file", type=Path, help="Дополнительно писать логи в файл")
+    parser.add_argument("--storage", type=Path, help="Каталог с файлами пользователей")
+    parser.add_argument("--db", type=Path, help="Файл базы данных SQLite")
+    parser.add_argument(
+        "--no-registration",
+        action="store_true",
+        help="Запретить регистрацию новых пользователей",
+    )
     return parser
 
 
@@ -45,6 +54,9 @@ def build_config(args: argparse.Namespace) -> ServerConfig:
             ("host", args.host),
             ("port", args.port),
             ("log_level", args.log_level),
+            ("storage_root", args.storage),
+            ("db_path", args.db),
+            ("allow_registration", False if args.no_registration else None),
         )
         if value is not None
     }
@@ -66,7 +78,13 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("Порт %d требует прав администратора", config.port)
 
     try:
-        TCPServer(config).serve_forever()
+        server = TCPServer(config)
+    except (OSError, sqlite3.Error) as exc:
+        logger.error("Не удалось подготовить хранилище или базу данных: %s", exc)
+        return 1
+
+    try:
+        server.serve_forever()
     except OSError as exc:
         logger.error("Не удалось запустить сервер на %s:%d — %s", config.host, config.port, exc)
         return 1

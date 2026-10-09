@@ -1,6 +1,6 @@
 """Слушающий сокет, цикл приёма подключений и запуск потоков.
 
-Этап 7: каждому клиенту выделяется отдельный поток.
+Каждому клиенту выделяется отдельный поток.
 
 Зачем это нужно, видно из устройства сокетов: и accept(), и recv() —
 блокирующие вызовы. Пока сервер в одном потоке разговаривает с клиентом,
@@ -16,6 +16,7 @@ import logging
 import socket
 import threading
 
+from .app import Services
 from .config import ServerConfig
 from .connection import handle_connection, refuse_connection
 from .handlers import build_dispatcher
@@ -38,9 +39,10 @@ class TCPServer:
         self._config = config
         self._socket: socket.socket | None = None
         self._running = False
-        # Реестр команд собирается один раз при запуске: после сборки он
-        # только читается, поэтому его безопасно делить между потоками.
-        self._dispatcher = build_dispatcher()
+        # База, хранилище и реестр команд создаются один раз при запуске и
+        # делятся между потоками: см. server/app.py о том, почему это безопасно.
+        self._services = Services.build(config)
+        self._dispatcher = build_dispatcher(self._services)
 
         # Единственное, что потоки разделяют: счётчик активных соединений.
         # Операция «прочитать, прибавить, записать» не атомарна, поэтому
@@ -61,6 +63,8 @@ class TCPServer:
 
         host, port = self._config.address
         logger.info("Сервер слушает %s:%d", host, port)
+        logger.info("Хранилище: %s", self._services.files.root)
+        logger.info("База данных: %s", self._services.db.path.resolve())
         logger.info("Доступные команды: %s", ", ".join(self._dispatcher.commands))
         logger.info("Предел одновременных клиентов: %d", self._config.max_connections)
         logger.info("Остановка — Ctrl+C")
