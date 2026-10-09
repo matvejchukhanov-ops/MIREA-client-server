@@ -2,232 +2,170 @@
 
 Все диаграммы записаны на языке Mermaid и отрисовываются GitHub автоматически —
 исходный текст остаётся в репозитории и правится вместе с кодом.
+Схема базы данных — в [database.md](database.md#1-схема).
 
 ---
 
 ## 1. Диаграмма компонентов
 
-Показывает, из каких частей состоит система и в какую сторону направлены
-зависимости.
-
 ```mermaid
 graph TB
     subgraph CL["Клиент"]
-        CM["main.py<br/>цикл ввода, разбор команд"]
+        CM["main.py<br/>цикл ввода, пароль, подтверждения"]
+        CD["commands.py<br/>строка → запрос"]
+        CR["render.py<br/>ответ → текст"]
         CC["connection.py<br/>ServerConnection"]
     end
 
-    subgraph CO["common — общий код"]
-        FR["framing.py<br/>FrameReader, encode_frame"]
+    subgraph CO["common"]
+        FR["framing.py<br/>FrameReader"]
     end
 
     subgraph SV["Сервер"]
-        SM["main.py<br/>аргументы, точка входа"]
         TS["tcp_server.py<br/>TCPServer"]
         CN["connection.py<br/>обмен с клиентом"]
         PR["protocol.py<br/>Request, ErrorCode"]
-        DP["dispatcher.py<br/>Dispatcher"]
-        HD["handlers.py<br/>calc, ping, history, quit"]
-        SS["session.py<br/>Session"]
-        CF["config.py<br/>ServerConfig"]
+        DP["dispatcher.py<br/>доступ, аудит"]
+        HD["handlers.py<br/>команды"]
+        AP["app.py<br/>Services"]
     end
 
-    subgraph CA["server/calc — вычислительное ядро"]
-        LX["lexer.py"]
-        PS["parser.py"]
-        EV["evaluator.py"]
-        ER["errors.py"]
+    subgraph FS["server/fs"]
+        SB["sandbox.py"]
+        MG["manager.py"]
+        LK["locks.py"]
+        FM["formats.py"]
+        AR["archive.py"]
+        DR["drives.py"]
     end
 
+    subgraph DB["server/db"]
+        RP["repository.py"]
+        SC[("schema.sql<br/>SQLite")]
+    end
+
+    subgraph AU["server/auth"]
+        PW["passwords.py<br/>scrypt"]
+        AS["service.py"]
+    end
+
+    CM --> CD
+    CM --> CR
     CM --> CC
     CC --> FR
     CC -. "TCP :9000" .-> CN
 
-    SM --> TS
-    SM --> CF
     TS --> CN
-    TS --> DP
+    TS --> AP
     CN --> FR
     CN --> PR
-    CN --> SS
+    CN --> DP
     DP --> HD
-    HD --> CA
-    LX --> ER
-    PS --> LX
-    EV --> PS
+    DP --> RP
+    HD --> MG
+    HD --> FM
+    HD --> AR
+    HD --> DR
+    HD --> RP
+    HD --> AS
+    MG --> SB
+    MG --> LK
+    AR --> MG
+    AS --> PW
+    AS --> RP
+    RP --> SC
 ```
 
-Обрати внимание на два обстоятельства:
-
-- **`common/framing.py` используют обе стороны.** Проблема границ сообщений
-  симметрична, дублировать код означало бы чинить каждую ошибку дважды.
-- **`server/calc/` не имеет ни одной стрелки в сторону сети.** Это позволяет
-  тестировать вычисления без сокетов.
+Пакеты `fs`, `db`, `auth` не имеют стрелок в сторону сети и протокола —
+поэтому тестируются без сокетов.
 
 ---
 
-## 2. Диаграмма классов: сетевая часть
+## 2. Диаграмма классов: сервер
 
 ```mermaid
 classDiagram
-    class TCPServer {
-        -ServerConfig _config
-        -Dispatcher _dispatcher
-        -Lock _lock
-        -int _active
-        +serve_forever()
-        +shutdown()
-        +active_connections() int
-    }
-
-    class ServerConfig {
-        +str host
-        +int port
-        +int backlog
-        +int recv_size
-        +int max_frame_size
-        +float idle_timeout
-        +int max_connections
-        +from_env() ServerConfig
-    }
-
     class Dispatcher {
-        -dict _handlers
-        +register(name, handler)
+        -dict _commands
+        -AuditSink _audit
+        +register(name, handler, public, audited)
         +dispatch(request, session)
-        +commands() list
     }
-
     class Session {
         +str peer
+        +AuthenticatedUser user
+        +int failed_logins
         +bool should_close
-        +deque history
-        +remember(expr, result)
-        +recent(limit) list
+        +is_authenticated() bool
     }
-
-    class Request {
-        +str cmd
-        +id
-        +dict payload
-        +require_str(name) str
-        +optional_int(name, default) int
+    class Services {
+        +ServerConfig config
+        +Database db
+        +AuthService auth
+        +FileManager files
+        +FileRegistry registry
+        +AuditLog audit
+        +ZipLimits zip_limits
+        +build(config)$ Services
     }
-
-    class FrameReader {
-        -bytearray _buffer
-        -int _max_frame_size
-        +feed(data) list
-        +pending() int
-        +reset()
+    class Handlers {
+        +login() register() logout()
+        +ls() info() read() write() delete()
+        +mkdir() rmdir()
+        +json_read() json_write() xml_read() xml_write()
+        +zip() zip_list() unzip()
+        +drives() log() ops()
     }
-
-    class ProtocolError {
-        +ErrorCode code
-        +str message
-        +int position
+    class FileManager {
+        +PathLocks locks
+        +for_user(user_id) UserFiles
     }
-
-    TCPServer --> ServerConfig : читает
-    TCPServer --> Dispatcher : владеет
-    TCPServer ..> Session : создаёт на клиента
-    TCPServer ..> FrameReader : создаёт на клиента
-    Dispatcher ..> Request : принимает
-    Dispatcher ..> Session : передаёт обработчику
-    Dispatcher ..> ProtocolError : бросает
-```
-
-`Dispatcher` один на весь сервер и после сборки только читается, поэтому
-делится между потоками без синхронизации. `Session` и `FrameReader` создаются
-на каждое соединение и живут внутри своего потока.
-
----
-
-## 3. Диаграмма классов: дерево разбора
-
-```mermaid
-classDiagram
-    class Node {
-        <<union>>
+    class UserFiles {
+        +Sandbox sandbox
+        +list_dir(path) info(path)
+        +read_text(path) write_text(path, content, overwrite)
+        +delete_file(path) make_dir(path) remove_dir(path)
     }
-    class Number {
-        +value
-        +int position
+    class Sandbox {
+        -Path _root
+        +resolve(raw) Path
+        +relative(path) str
     }
-    class UnaryOp {
-        +str operator
-        +Node operand
-        +int position
+    class PathLocks {
+        +hold(paths) contextmanager
     }
-    class BinaryOp {
-        +str operator
-        +Node left
-        +Node right
-        +int position
+    class AuthService {
+        +register(username, password)
+        +login(username, password)
     }
-    class Token {
-        +TokenType type
-        +int position
-        +value
+    class Database {
+        +initialize()
+        +connect()
+        +transaction()
     }
+    class UserRepository
+    class FileRegistry
+    class AuditLog
 
-    Node <|-- Number
-    Node <|-- UnaryOp
-    Node <|-- BinaryOp
-    UnaryOp --> Node : operand
-    BinaryOp --> Node : left, right
-```
-
-Уточнение: в коде `Node` — не базовый класс, а объединение типов
-(`Number | UnaryOp | BinaryOp`). На диаграмме показано наследованием, потому
-что смысл тот же: в любом месте, где ожидается узел, допустим любой из трёх.
-
----
-
-## 4. Диаграмма последовательности: вычисление выражения
-
-```mermaid
-sequenceDiagram
-    actor U as Пользователь
-    participant C as Клиент
-    participant T as TCPServer
-    participant N as connection
-    participant P as protocol
-    participant D as Dispatcher
-    participant H as handle_calc
-    participant K as calc
-
-    U->>C: вводит "2 + 3 * 4"
-    C->>C: build_request
-    C->>N: кадр запроса по TCP
-
-    Note over T,N: соединение уже принято,<br/>обмен идёт в своём потоке
-
-    N->>N: FrameReader.feed
-    N->>P: parse_request
-    P-->>N: Request
-    N->>D: dispatch
-    D->>H: handle_calc
-    H->>K: calculate
-    K->>K: tokenize
-    K->>K: parse
-    K->>K: evaluate
-    K-->>H: 14
-    H->>H: session.remember
-    H-->>D: 14
-    D-->>N: 14
-    N->>P: success_frame
-    P-->>N: кадр ответа
-    N-->>C: кадр ответа по TCP
-    C->>C: format_response
-    C-->>U: 14
+    Dispatcher --> Handlers : вызывает
+    Dispatcher --> AuditLog : пишет
+    Dispatcher ..> Session : проверяет вход
+    Handlers --> Services
+    Services --> FileManager
+    Services --> AuthService
+    Services --> FileRegistry
+    FileManager ..> UserFiles : создаёт
+    FileManager --> PathLocks
+    UserFiles --> Sandbox
+    AuthService --> UserRepository
+    UserRepository --> Database
+    FileRegistry --> Database
+    AuditLog --> Database
 ```
 
 ---
 
-## 5. Диаграмма последовательности: ошибка вычисления
-
-Показывает, что ошибка в данных клиента **не разрывает соединение**.
+## 3. Последовательность: запись файла
 
 ```mermaid
 sequenceDiagram
@@ -235,176 +173,154 @@ sequenceDiagram
     participant C as Клиент
     participant N as connection
     participant D as Dispatcher
-    participant H as handle_calc
-    participant K as calc
+    participant H as Handlers.write
+    participant F as UserFiles
+    participant DB as SQLite
 
-    U->>C: вводит "10 / 0"
-    C->>N: кадр запроса
+    U->>C: write docs/a.txt + текст
+    C->>N: {"cmd":"write","path":"docs/a.txt","content":"..."}
+    N->>D: dispatch(request, session)
+    D->>D: session.user есть?
+    D->>H: write
+    H->>F: write_text(path, content, overwrite)
+    F->>F: sandbox.resolve → storage/user-7/docs/a.txt
+    F->>F: блокировка пути
+    F->>F: временный файл, fsync, os.replace
+    F-->>H: WrittenFile(created=true)
+    H->>DB: INSERT INTO files
+    DB->>DB: триггер → INSERT INTO operations ('create')
+    H-->>D: {"path","size","created"}
+    D->>DB: INSERT INTO audit_log (успех)
+    D-->>N: результат
+    N-->>C: {"status":"ok",...}
+    C-->>U: Создан /docs/a.txt
+```
+
+---
+
+## 4. Последовательность: отражённая атака
+
+Попытка выйти из каталога не доходит до файловой системы, но оставляет след.
+
+```mermaid
+sequenceDiagram
+    actor A as Нарушитель
+    participant N as connection
+    participant D as Dispatcher
+    participant H as Handlers.read
+    participant S as Sandbox
+    participant DB as SQLite
+
+    A->>N: {"cmd":"read","path":"../../etc/passwd"}
     N->>D: dispatch
-    D->>H: handle_calc
-    H->>K: calculate
-    K--xH: DivisionByZeroError
-    H--xD: ProtocolError DIV_BY_ZERO
+    D->>H: read
+    H->>S: resolve("../../etc/passwd")
+    S--xH: BadPathError
+    H--xD: ProtocolError BAD_PATH
+    D->>DB: INSERT INTO audit_log (success=0, details=BAD_PATH)
     D--xN: ProtocolError
-    N->>N: error_frame
-    N-->>C: status error, code DIV_BY_ZERO
-    C-->>U: Ошибка [DIV_BY_ZERO]
-
+    N-->>A: {"status":"error","code":"BAD_PATH",...}
     Note over N: соединение остаётся открытым
-
-    U->>C: вводит "2 + 2"
-    C->>N: кадр запроса
-    N-->>C: status ok, result 4
-    C-->>U: 4
 ```
 
 ---
 
-## 6. Диаграмма состояний соединения
+## 5. Состояния сессии
 
 ```mermaid
 stateDiagram-v2
-    state "Ожидание данных" as reading
-    state "Сборка кадра" as framing
-    state "Обработка запроса" as processing
-    state "Корректное закрытие" as closing
+    state "Без входа" as anon
+    state "Вошёл" as auth
+    state "Закрыто" as closed
 
-    [*] --> reading : accept, запуск потока
-    reading --> framing : recv вернул байты
-    framing --> reading : кадр не завершён
-    framing --> processing : кадр собран
-    processing --> reading : ответ отправлен
-    processing --> closing : команда quit
-    reading --> closing : recv вернул 0
-    reading --> closing : таймаут бездействия
-    framing --> closing : превышен размер кадра
-    closing --> [*] : сокет закрыт, поток завершён
+    [*] --> anon : подключение
+    anon --> auth : login / register успешно
+    anon --> anon : неудачный login (счётчик +1)
+    anon --> closed : 5 неудачных login
+    auth --> anon : logout
+    auth --> auth : файловые команды
+    anon --> closed : quit, разрыв, таймаут
+    auth --> closed : quit, разрыв, таймаут
+    closed --> [*]
 ```
 
-Переход `framing → reading` — тот самый случай, когда сообщение пришло не
-целиком: часть байт остаётся в буфере до следующего чтения.
+В состоянии «Без входа» доступны только `register`, `login`, `ping`, `quit`;
+остальное получает `AUTH_REQUIRED`.
 
 ---
 
-## 7. Диаграмма деятельности: обработка одного кадра
+## 6. Деятельность: распаковка архива
 
 ```mermaid
 flowchart TD
-    A["Кадр получен"] --> B{"Разбирается<br/>как JSON?"}
-    B -- нет --> E1["Ответ BAD_JSON"]
-    B -- да --> C{"Это объект<br/>с полем cmd?"}
-    C -- нет --> E2["Ответ BAD_REQUEST"]
-    C -- да --> D{"Команда<br/>известна?"}
-    D -- нет --> E3["Ответ UNKNOWN_COMMAND"]
-    D -- да --> F["Вызов обработчика"]
-    F --> G{"Результат?"}
-    G -- "ProtocolError" --> E4["Ответ с кодом ошибки"]
-    G -- "прочее исключение" --> E5["Лог с трассировкой<br/>Ответ INTERNAL_ERROR"]
-    G -- "значение" --> H["Ответ status ok"]
-
-    E1 --> Z["Отправка кадра ответа"]
-    E2 --> Z
-    E3 --> Z
-    E4 --> Z
-    E5 --> Z
-    H --> Z
-    Z --> Y["Соединение остаётся открытым"]
+    A["unzip архив каталог"] --> B{"Каталог<br/>уже есть?"}
+    B -- да --> X1["ALREADY_EXISTS"]
+    B -- нет --> C{"Записей больше<br/>предела?"}
+    C -- да --> X2["UNSAFE_ARCHIVE"]
+    C -- нет --> D["Для каждой записи"]
+    D --> E{"Зашифрована<br/>или ссылка?"}
+    E -- да --> X2
+    E -- нет --> F{"Имя проходит<br/>правила пути?"}
+    F -- нет --> X3["UNSAFE_ARCHIVE<br/>Zip Slip"]
+    F -- да --> G{"Дубликат<br/>без учёта регистра?"}
+    G -- да --> X2
+    G -- нет --> H{"Сумма размеров и<br/>степень сжатия в пределах?"}
+    H -- нет --> X4["UNSAFE_ARCHIVE<br/>zip-бомба"]
+    H -- да --> D
+    D -- "все проверены" --> I["Распаковка во временный каталог<br/>со счётом байт"]
+    I --> J{"Байт больше<br/>объявленного?"}
+    J -- да --> X5["UNSAFE_ARCHIVE<br/>временный каталог удалён"]
+    J -- нет --> K["Переименование в целевой каталог"]
+    K --> L["Реестр: все файлы одной транзакцией"]
 ```
 
-Ключевое свойство: **из этой схемы нет выхода в разрыв соединения.** Любая
-беда становится ответом. Соединение закрывается только выше по уровню —
-при нарушении фрейминга или по команде `quit`.
+Все проверки по заголовкам — до записи первого байта; счёт байт — на случай,
+если заголовки лгут.
 
 ---
 
-## 8. Диаграмма потоков сервера
+## 7. Потоки сервера
 
 ```mermaid
 graph TB
-    M["Главный поток<br/>цикл accept()"]
-    L{"Достигнут предел<br/>подключений?"}
-    R["refuse_connection<br/>SERVER_BUSY"]
-    T1["Поток client-1<br/>Session, FrameReader"]
-    T2["Поток client-2<br/>Session, FrameReader"]
-    T3["Поток client-N<br/>Session, FrameReader"]
-    S["Общее состояние:<br/>счётчик подключений<br/>под threading.Lock"]
-    DP["Dispatcher<br/>только чтение"]
+    M["Главный поток<br/>accept()"]
+    L{"Предел<br/>подключений?"}
+    R["SERVER_BUSY"]
+    T1["Поток клиента 1<br/>Session, FrameReader"]
+    T2["Поток клиента 2<br/>Session, FrameReader"]
+    S["Счётчик соединений<br/>Lock"]
+    PL["PathLocks<br/>замок на путь"]
+    DB[("SQLite<br/>BEGIN IMMEDIATE, WAL")]
 
     M --> L
     L -- да --> R
     L -- нет --> T1
     L -- нет --> T2
-    L -- нет --> T3
+    M -.-> S
     T1 -.-> S
     T2 -.-> S
-    T3 -.-> S
-    M -.-> S
-    T1 -.-> DP
-    T2 -.-> DP
-    T3 -.-> DP
+    T1 -.-> PL
+    T2 -.-> PL
+    T1 -.-> DB
+    T2 -.-> DB
 ```
-
-Общего изменяемого состояния всего одно — счётчик. Буфер чтения и история
-живут внутри своего потока, поэтому гонкам взяться неоткуда. Это не
-случайность, а способ проектирования: надёжнее устранить условия для гонок,
-чем расставлять блокировки.
 
 ---
 
-## 9. Диаграмма развёртывания
+## 8. Развёртывание
 
 ```mermaid
 graph LR
-    subgraph H["Рабочая станция"]
-        subgraph P1["Процесс: сервер"]
-            SRV["python -m server.main<br/>слушает 127.0.0.1:9000"]
-        end
-        subgraph P2["Процесс: клиент 1"]
-            CL1["python -m client.main"]
-        end
-        subgraph P3["Процесс: клиент N"]
-            CL2["python -m client.main"]
-        end
+    subgraph H["Машина сервера"]
+        SRV["python -m server.main<br/>:9000"]
+        ST[("storage/<br/>user-1, user-2 …")]
+        DBF[("data/filemanager.db")]
+        SRV --> ST
+        SRV --> DBF
     end
-
-    CL1 -- "TCP" --> SRV
-    CL2 -- "TCP" --> SRV
+    CL1["python -m client.main"] -- TCP --> SRV
+    CL2["python -m client.main"] -- TCP --> SRV
 ```
 
-Штатный режим — всё на одной машине через петлевой интерфейс. Для работы по
-локальной сети сервер запускается с `--host 0.0.0.0`, клиент получает адрес
-машины через `--host`. Шифрования нет, поэтому выставлять сервер в интернет
-не следует.
-
----
-
-## 10. Дерево разбора выражения
-
-Наглядное объяснение того, откуда берётся приоритет операций.
-
-Выражение `2 + 3 * 4`:
-
-```mermaid
-graph TD
-    A(("+")) --- B(("2"))
-    A --- C(("*"))
-    C --- D(("3"))
-    C --- E(("4"))
-```
-
-Умножение оказалось **глубже** в дереве, а вычисление идёт снизу вверх:
-сначала `3 * 4 = 12`, потом `2 + 12 = 14`. Приоритет нигде не запрограммирован —
-он следует из того, что правило «выражение» состоит из «слагаемых», а
-«слагаемое» из «множителей».
-
-Для сравнения, `(2 + 3) * 4`:
-
-```mermaid
-graph TD
-    A(("*")) --- B(("+"))
-    A --- C(("4"))
-    B --- D(("2"))
-    B --- E(("3"))
-```
-
-Скобки подняли сложение вниз по дереву, и оно вычисляется первым: `20`.
+Штатно — всё на одной машине через `127.0.0.1`. Шифрования нет, поэтому по
+сети — только в доверенной.
