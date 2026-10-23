@@ -56,7 +56,9 @@
 
 ```
 client-server/
-├── common/framing.py        границы сообщений поверх TCP
+├── common/
+│   ├── framing.py           границы сообщений поверх TCP
+│   └── strict_json.py       строгий JSON: без дубликатов ключей и NaN
 ├── server/
 │   ├── main.py              точка входа
 │   ├── config.py            настройки и пределы
@@ -71,7 +73,7 @@ client-server/
 │   ├── db/                  схема SQLite, запросы
 │   └── fs/                  песочница, файлы, JSON/XML, ZIP, диски
 ├── client/                  консольный клиент
-├── tests/                   234 теста
+├── tests/                   241 тест
 └── docs/                    документация
 ```
 
